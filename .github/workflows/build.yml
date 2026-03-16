@@ -56,9 +56,40 @@ jobs:
             -format UDZO \
             "$DMG_NAME"
 
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          # Extract the section for this version from CHANGELOG.md
+          BODY=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
+          # Fallback if no changelog entry found
+          if [ -z "$BODY" ]; then
+            BODY="See [CHANGELOG.md](https://github.com/Lcharvol/Claude-God/blob/main/CHANGELOG.md) for details."
+          fi
+          # Write to file to preserve formatting
+          echo "$BODY" > /tmp/release-body.md
+          # Append install instructions
+          cat >> /tmp/release-body.md << 'INSTALL'
+
+---
+
+## Install
+
+**Homebrew (recommended)**
+```bash
+brew tap lcharvol/tap
+brew install --cask claude-god
+```
+
+**Manual** — download `ClaudeGod.dmg` below, drag to Applications, then run:
+```bash
+xattr -cr /Applications/Claude\ God.app
+```
+INSTALL
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ClaudeGod.dmg
-          generate_release_notes: true
+          body_path: /tmp/release-body.md
           draft: false
