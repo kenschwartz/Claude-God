@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.19.3] - 2026-03-31
+
+### Fixed
+- Auto-refresh was off by default for new users (UserDefaults returned 0 = "Off" on first launch instead of 2 min)
+
 ## [2.19.2] - 2026-03-31
 
 ### Fixed
