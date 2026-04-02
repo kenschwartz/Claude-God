@@ -164,8 +164,9 @@ git tag v2.8.0 && git push origin v2.8.0
 
 ## Changelog
 
-### v2.20.0
-- **New**: Peak / off-peak indicator — shows if you're in peak hours (Mon–Fri 7am–5pm PT) with countdown to transition
+### v2.20.1
+- **Fixed**: Refresh no longer gets stuck — cancellable fetches, stale response detection, centralized state reset
+- **New**: Peak / off-peak indicator with countdown to transition
 
 ### v2.19.0
 - **Perf**: JSONL parsing without Data→String roundtrip, SQLite 9→4 queries, widget skip unchanged, keychain off main thread

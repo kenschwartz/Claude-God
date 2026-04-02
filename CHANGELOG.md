@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.20.1] - 2026-04-02
+
+### Fixed
+- Refresh no longer gets stuck or spins forever — fetch requests are now cancellable with stale response detection
+- All retry paths use `[weak self]` to prevent retain cycles and parallel fetch races
+- Centralized `finishLoading()` guarantees `isLoading` is always reset (no more missed code paths)
+- Safety timeout reduced to 20s and now cancels the in-flight request
+- Wake observer cancels stale fetches before refreshing
+
 ## [2.20.0] - 2026-04-02
 
 ### Added

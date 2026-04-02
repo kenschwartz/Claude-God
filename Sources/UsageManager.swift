@@ -203,6 +203,8 @@ class UsageManager: ObservableObject {
     @Published var quotas: [UsageQuota] = []
     @Published var isLoading = false
     private var loadingStartedAt: Date?
+    private var currentFetchTask: URLSessionDataTask?
+    private var currentFetchID: UUID?
     @Published var errorMessage: String?
     @Published var lastRefresh: Date?
     @Published var timeUntilReset: String = "—"
@@ -1008,11 +1010,11 @@ class UsageManager: ObservableObject {
     }
 
     private func refreshInternal() {
-        // Safety: if isLoading has been stuck for >30s, force-reset it
-        if isLoading, let started = loadingStartedAt, Date().timeIntervalSince(started) > 30 {
-            Log.warn("isLoading was stuck for >30s — force-resetting")
-            isLoading = false
-            loadingStartedAt = nil
+        // Safety: if isLoading has been stuck for >20s, cancel in-flight fetch and reset
+        if isLoading, let started = loadingStartedAt, Date().timeIntervalSince(started) > 20 {
+            Log.warn("isLoading stuck for >20s — cancelling fetch and resetting")
+            currentFetchTask?.cancel()
+            finishLoading()
         }
         guard !isLoading else { return }
         guard isAuthenticated, auth.accessToken != nil else {
@@ -1067,9 +1069,19 @@ class UsageManager: ObservableObject {
     private func fetchUsage(retryCount: Int = 0) {
         guard let token = auth.accessToken else {
             isLoading = false
+            loadingStartedAt = nil
             errorMessage = "No access token — run `claude login`"
             return
         }
+
+        // Tag this fetch so stale responses from cancelled/superseded fetches are ignored
+        let fetchID = currentFetchID ?? UUID()
+        if retryCount == 0 {
+            currentFetchTask?.cancel()
+            let newID = UUID()
+            currentFetchID = newID
+        }
+        let activeFetchID = currentFetchID!
 
         var request = URLRequest(url: Self.usageURL)
         request.httpMethod = "GET"
@@ -1080,29 +1092,37 @@ class UsageManager: ObservableObject {
         request.setValue("ClaudeGod", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        Log.info("Fetching usage from OAuth API... (attempt \(retryCount + 1))")
+        Log.info("Fetching usage from OAuth API... (attempt \(retryCount + 1), id: \(activeFetchID.uuidString.prefix(8)))")
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // Ignore response if a newer fetch has been started
+                guard self.currentFetchID == activeFetchID else {
+                    Log.info("Ignoring stale fetch response (id: \(activeFetchID.uuidString.prefix(8)))")
+                    return
+                }
 
                 if let error = error {
+                    // Don't retry if cancelled
+                    if (error as NSError).code == NSURLErrorCancelled {
+                        Log.info("Fetch cancelled")
+                        return
+                    }
                     if retryCount < Self.maxRetries {
                         let delay = pow(2.0, Double(retryCount))
                         Log.warn("Network error, retrying in \(Int(delay))s: \(error.localizedDescription)")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                            self.fetchUsage(retryCount: retryCount + 1)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            self?.fetchUsage(retryCount: retryCount + 1)
                         }
                         return
                     }
-                    self.isLoading = false
-                    self.errorMessage = "Network error — check your connection"
+                    self.finishLoading(error: "Network error — check your connection")
                     return
                 }
 
                 guard let httpResponse = response as? HTTPURLResponse else {
-                    self.isLoading = false
-                    self.errorMessage = "Invalid response"
+                    self.finishLoading(error: "Invalid response")
                     return
                 }
 
@@ -1111,19 +1131,17 @@ class UsageManager: ObservableObject {
                 switch httpResponse.statusCode {
                 case 200:
                     guard let data = data else {
-                        self.isLoading = false
-                        self.errorMessage = "Empty response"
+                        self.finishLoading(error: "Empty response")
                         return
                     }
                     if let raw = String(data: data, encoding: .utf8) {
                         Log.info("Response: \(raw.prefix(500))")
                     }
-                    // Store previous utilizations for reset detection
                     self.previousQuotaUtilizations = Dictionary(
                         uniqueKeysWithValues: self.quotas.map { ($0.label, $0.utilization) }
                     )
                     self.parseUsageResponse(data)
-                    self.isLoading = false
+                    self.finishLoading()
                     self.lastRefresh = Date()
                     self.refreshStats()
                     self.checkNotifications()
@@ -1135,73 +1153,75 @@ class UsageManager: ObservableObject {
                 case 401, 403:
                     if self.auth.refreshToken != nil && retryCount == 0 {
                         Log.info("Got \(httpResponse.statusCode), attempting token refresh...")
-                        self.auth.reloadCredentials { success in
+                        self.auth.reloadCredentials { [weak self] success in
+                            guard let self else { return }
                             if success {
                                 self.fetchUsage(retryCount: retryCount + 1)
                             } else {
                                 DispatchQueue.main.async {
-                                    self.isLoading = false
-                                    self.errorMessage = "Session expired — run `claude login`"
+                                    self.finishLoading(error: "Session expired — run `claude login`")
                                 }
                             }
                         }
                     } else {
-                        self.isLoading = false
-                        self.errorMessage = "Session expired — run `claude login`"
+                        self.finishLoading(error: "Session expired — run `claude login`")
                     }
 
                 case 429:
-                    // Retry-After: 0 usually means stale token, not real rate limit
                     let retryAfterHeader = httpResponse.value(forHTTPHeaderField: "Retry-After")
                     let retryAfterValue = retryAfterHeader.flatMap(Double.init) ?? -1
                     let isLikelyStaleToken = retryAfterValue == 0
 
                     if isLikelyStaleToken && self.auth.refreshToken != nil && retryCount == 0 {
-                        // Token likely expired server-side — refresh and retry once
                         Log.info("429 with Retry-After:0 — likely stale token, refreshing...")
-                        self.auth.reloadCredentials { success in
+                        self.auth.reloadCredentials { [weak self] success in
+                            guard let self else { return }
                             if success {
                                 Log.info("Token refreshed, retrying fetch...")
                                 self.fetchUsage(retryCount: retryCount + 1)
                             } else {
                                 DispatchQueue.main.async {
-                                    self.isLoading = false
-                                    self.errorMessage = "Session expired — run `claude login`"
+                                    self.finishLoading(error: "Session expired — run `claude login`")
                                 }
                             }
                         }
                     } else if !self.quotas.isEmpty {
-                        // We have cached data — cap cooldown to 60s max
                         let cooldown = min(retryAfterValue > 0 ? retryAfterValue : 30.0, 60.0)
-                        self.isLoading = false
+                        self.finishLoading()
                         self.rateLimitedUntil = Date().addingTimeInterval(cooldown)
-                        self.errorMessage = nil  // Don't show error, we have cached data
                         Log.info("Rate limited (429), keeping existing data, retry in \(Int(cooldown))s")
                     } else if retryCount < Self.maxRetries {
                         let delay = 5 * pow(2.0, Double(retryCount))
                         Log.info("Rate limited (429), retrying in \(Int(delay))s (attempt \(retryCount + 1)/\(Self.maxRetries))...")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                            self.fetchUsage(retryCount: retryCount + 1)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            self?.fetchUsage(retryCount: retryCount + 1)
                         }
                     } else {
-                        self.isLoading = false
-                        self.errorMessage = "Rate limited — run `claude login` to refresh"
+                        self.finishLoading(error: "Rate limited — run `claude login` to refresh")
                     }
 
                 default:
                     if httpResponse.statusCode >= 500 && retryCount < Self.maxRetries {
                         let delay = pow(2.0, Double(retryCount))
                         Log.warn("Server error \(httpResponse.statusCode), retrying in \(Int(delay))s")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                            self.fetchUsage(retryCount: retryCount + 1)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            self?.fetchUsage(retryCount: retryCount + 1)
                         }
                         return
                     }
-                    self.isLoading = false
-                    self.errorMessage = "Error \(httpResponse.statusCode)"
+                    self.finishLoading(error: "Error \(httpResponse.statusCode)")
                 }
             }
-        }.resume()
+        }
+        currentFetchTask = task
+        task.resume()
+    }
+
+    /// Centralized loading state reset — guarantees isLoading is always cleared
+    private func finishLoading(error: String? = nil) {
+        isLoading = false
+        loadingStartedAt = nil
+        errorMessage = error
     }
 
     // MARK: - Response parsing (Codable)
@@ -1332,9 +1352,9 @@ class UsageManager: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             Log.info("System wake detected — refreshing timers and data")
-            // Force-reset isLoading in case it was stuck during sleep
-            self.isLoading = false
-            self.loadingStartedAt = nil
+            // Cancel any in-flight fetch and reset loading state
+            self.currentFetchTask?.cancel()
+            self.finishLoading()
             // Recreate timers (they may have drifted or died during sleep)
             self.setupCountdownTimer()
             self.setupAutoRefresh()
