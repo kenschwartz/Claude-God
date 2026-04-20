@@ -81,7 +81,7 @@ struct MenuBarView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
-            .frame(minHeight: 320, maxHeight: 650)
+            .background(WindowResizer(windowHeight: $manager.windowHeight))
 
             SHDivider()
 
@@ -90,7 +90,8 @@ struct MenuBarView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
-        .frame(width: manager.compactMode && !manager.showSettings && manager.selectedTab == .usage ? 300 : 400)
+        .frame(width: manager.compactMode && !manager.showSettings && manager.selectedTab == .usage ? 300 : 400,
+               height: manager.windowHeight)
         .animation(.easeOut(duration: 0.15), value: manager.selectedTab)
         .animation(.easeOut(duration: 0.15), value: manager.showSettings)
         .onAppear {
@@ -481,6 +482,7 @@ struct MenuBarView: View {
                         .font(.system(size: 12))
                         .toggleStyle(.switch)
                         .controlSize(.small)
+
                     SHDivider()
                     Toggle("Launch at login", isOn: $manager.launchAtLogin)
                         .font(.system(size: 12))
@@ -513,6 +515,12 @@ struct MenuBarView: View {
                             if let url = URL(string: "https://github.com/Lcharvol/Claude-God/issues") {
                                 NSWorkspace.shared.open(url)
                             }
+                        }
+                    }
+                    if let raw = manager.lastRawAPIResponse {
+                        SHButton(label: "Copy raw API response", icon: "doc.on.clipboard", style: .ghost) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(raw, forType: .string)
                         }
                     }
                     HStack(spacing: 8) {
@@ -706,6 +714,48 @@ struct MenuBarView: View {
                         .background(
                             RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
                                 .fill(Color.yellow.opacity(0.05))
+                        )
+                )
+            }
+
+            // Extra usage
+            if let extra = manager.extraUsage {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plusminus.circle.fill")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(extra.isEnabled ? .green : .secondary)
+                        Text("Extra usage")
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                        SHBadge(text: extra.isEnabled ? "On" : "Off",
+                                color: extra.isEnabled ? .green : .secondary)
+                    }
+                    HStack {
+                        Text("Spent this month")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(extra.usedFormatted + (extra.currency.map { " \($0)" } ?? ""))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    }
+                    HStack {
+                        Text("Monthly limit")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(extra.limitFormatted)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+                        .strokeBorder(Color.green.opacity(0.15), lineWidth: 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: Theme.radius, style: .continuous)
+                                .fill(Color.green.opacity(0.04))
                         )
                 )
             }
@@ -3808,6 +3858,44 @@ struct HeatmapGrid: View {
                     .foregroundColor(.secondary)
             }
             .padding(.top, 4)
+        }
+    }
+}
+
+// MARK: - Window resizer
+
+/// Makes the MenuBarExtra window resizable by the user and persists the height.
+struct WindowResizer: NSViewRepresentable {
+    @Binding var windowHeight: Double
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.styleMask.insert(.resizable)
+            window.minSize = NSSize(width: 300, height: 400)
+            window.maxSize = NSSize(width: 600, height: 1400)
+            NotificationCenter.default.addObserver(
+                context.coordinator,
+                selector: #selector(Coordinator.windowDidResize(_:)),
+                name: NSWindow.didResizeNotification,
+                object: window
+            )
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(windowHeight: $windowHeight) }
+
+    class Coordinator: NSObject {
+        @Binding var windowHeight: Double
+        init(windowHeight: Binding<Double>) { _windowHeight = windowHeight }
+
+        @objc func windowDidResize(_ notification: Notification) {
+            guard let window = notification.object as? NSWindow else { return }
+            DispatchQueue.main.async { self.windowHeight = Double(window.frame.height) }
         }
     }
 }
