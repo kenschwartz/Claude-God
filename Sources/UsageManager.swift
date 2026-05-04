@@ -34,7 +34,7 @@ enum RefreshInterval: Int, CaseIterable, Identifiable {
 
 enum MenuBarDisplayMode: Int, CaseIterable, Identifiable {
     case iconOnly = 0
-    case rings = 4             // Apple Watch-style concentric rings
+    case rings = 5             // Apple Watch-style concentric rings
     case percentage = 1
     case percentageAndTimer = 2
     case allQuotas = 3
