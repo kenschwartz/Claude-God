@@ -698,7 +698,8 @@ class UsageManager: ObservableObject {
         auth.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.isAuthenticated && !self.isLoading && (self.quotas.isEmpty || self.errorMessage != nil) {
+                // tokenExpired guard prevents a flicker loop: fetchUsage -> reloadCredentials -> auth republishes -> sink fires again.
+                if self.isAuthenticated && !self.auth.tokenExpired && !self.isLoading && (self.quotas.isEmpty || self.errorMessage != nil) {
                     self.showSettings = false
                     self.refresh()
                 }
