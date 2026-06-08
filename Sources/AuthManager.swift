@@ -337,23 +337,45 @@ class AuthManager: ObservableObject {
     }
 
     private static func loadBestKeychainEntryWithPrefix(_ prefix: String) -> [String: Any]? {
-        let query: [String: Any] = [
+        // The legacy file-based login keychain rejects kSecReturnAttributes+kSecReturnData
+        // together with kSecMatchLimitAll (returns errSecParam). Enumerate refs+attributes
+        // first, then fetch each item's data with a per-item query.
+        let listQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecReturnAttributes as String: true,
-            kSecReturnData as String: true,
+            kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll
         ]
-        var raw: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &raw) == errSecSuccess,
-              let items = raw as? [[String: Any]] else { return nil }
+        var listRaw: CFTypeRef?
+        let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listRaw)
+        guard listStatus == errSecSuccess,
+              let items = listRaw as? [[String: Any]] else {
+            Log.info("loadBestKeychainEntryWithPrefix: list query failed status=\(listStatus)")
+            return nil
+        }
 
         var bestJSON: [String: Any]?
         var bestExpiry: Double = 0
+        var bestAccount: String = ""
 
         for item in items {
             guard let service = item[kSecAttrService as String] as? String,
-                  service.hasPrefix(prefix),
-                  let data = item[kSecValueData as String] as? Data,
+                  service.hasPrefix(prefix) else { continue }
+            let account = item[kSecAttrAccount as String] as? String ?? ""
+
+            var fetchQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            if !account.isEmpty {
+                fetchQuery[kSecAttrAccount as String] = account
+            }
+
+            var dataRaw: CFTypeRef?
+            guard SecItemCopyMatching(fetchQuery as CFDictionary, &dataRaw) == errSecSuccess,
+                  let data = dataRaw as? Data,
                   let trimmed = String(data: data, encoding: .utf8)?
                       .trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty,
@@ -367,11 +389,12 @@ class AuthManager: ObservableObject {
             if expiresAt > bestExpiry {
                 bestExpiry = expiresAt
                 bestJSON = json
+                bestAccount = account
             }
         }
 
         if bestJSON != nil {
-            Log.info("loadBestKeychainEntryWithPrefix: using suffixed entry (prefix: \(prefix))")
+            Log.info("loadBestKeychainEntryWithPrefix: using entry account=\(bestAccount.isEmpty ? "<empty>" : bestAccount) (prefix: \(prefix))")
         }
         return bestJSON
     }

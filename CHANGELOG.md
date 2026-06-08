@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.23.2] - 2026-06-08
+
+### Fixed
+- **PR #27 Keychain fallback actually works now** — the multi-entry scan in `loadBestKeychainEntryWithPrefix` called `SecItemCopyMatching` with `kSecReturnAttributes + kSecReturnData + kSecMatchLimitAll`. On the legacy file-based login keychain that combination returns `errSecParam (-50)`, so the function returned nil before reading any items, leaving users "Not connected" even when valid OAuth credentials existed in the Keychain. The scan now lists with refs+attributes, then fetches each item's data with a per-item query, so multi-entry keychains (Claude Code stores `account=unknown` and `account=<user>` side-by-side) resolve to the entry with a real `claudeAiOauth.accessToken`
+
 ## [2.23.1] - 2026-06-08
 
 ### Fixed

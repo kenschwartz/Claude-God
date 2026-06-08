@@ -164,6 +164,9 @@ git tag v2.8.0 && git push origin v2.8.0
 
 ## Changelog
 
+### v2.23.2
+- **Fixed**: PR #27 Keychain fallback actually works now — the scan called `SecItemCopyMatching` with an attribute combination (`kSecReturnAttributes + kSecReturnData + kSecMatchLimitAll`) that returns `errSecParam (-50)` on the legacy login keychain, so it bailed out before reading anything. Now lists refs+attributes first, then fetches each item's data with a per-item query, so users with multiple `Claude Code-credentials` entries (Claude Code stores `account=unknown` next to `account=<user>`) finally connect
+
 ### v2.23.1
 - **Fixed**: Embedded `claude auth login` no longer crashes the app — PTY slave FD was being closed twice (after the first close, the OS reused that FD slot for a guarded keychain socket, then the handle's dealloc triggered `EXC_GUARD`); slave handle now uses `closeOnDealloc: false` ([#26](https://github.com/Lcharvol/Claude-God/issues/26), [#27](https://github.com/Lcharvol/Claude-God/pull/27), thanks @nairdaleo)
 - **Fixed**: Credentials detected when only per-project Keychain entries exist — newer Claude Code writes suffixed entries (`Claude Code-credentials/path/...`) and may leave the base entry stale, so signed-in users appeared "Not connected"; `AuthManager` now scans all `Claude Code-credentials*` items as a fallback
