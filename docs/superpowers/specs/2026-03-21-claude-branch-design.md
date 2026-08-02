@@ -1,3 +1,11 @@
+---
+title: Claude Branch: Conversation Branching for Claude Code
+status: unknown
+project: infra
+tags: [spec, plugin, branching]
+created: 2026-03-21
+maps: ["[[moc/Infra MOC]]"]
+---
 # Claude Branch — Conversation Branching for Claude Code
 
 ## Overview

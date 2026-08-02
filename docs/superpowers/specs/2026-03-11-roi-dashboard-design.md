@@ -1,3 +1,11 @@
+---
+title: ROI Dashboard Design Spec
+status: unknown
+project: infra
+tags: [spec, dashboard, roi]
+created: 2026-03-11
+maps: ["[[moc/Infra MOC]]"]
+---
 # ROI Dashboard — Design Spec
 
 ## Overview
