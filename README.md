@@ -45,7 +45,7 @@
 | | Feature | Description |
 |---|---|---|
 | **Quotas** | Progress bars | Animated bars for session (5h), weekly, Sonnet & Opus quotas |
-| | Dynamic icon | Menu bar icon turns green/orange/red based on worst quota |
+| | Dynamic icon | Menu bar icon and text turn green/orange/red based on worst quota (toggle in Settings) |
 | | Live countdown | Real-time timer showing when quotas reset |
 | | Burn rate | Predicts when you'll hit the limit based on current velocity |
 | | Model advisor | Smart tips when quota imbalance is detected |
@@ -163,6 +163,41 @@ git tag v2.8.0 && git push origin v2.8.0
 ```
 
 ## Changelog
+
+### v2.25.4
+- **Fixed**: The app got permanently stuck once you stopped running `claude` in a terminal — v2.25.1 made it a pure credential reader, counting on the CLI to keep refreshing the shared Keychain entry, which the Claude desktop app never touches. The token expired, nothing revived it, and the popover showed "Rate limited" over a `401 token has expired`. `recoverSession()` now reloads disk/Keychain first and only spends the shared refresh token once the access token has been dead 12h — long enough that no running CLI can still hold it, so [#40](https://github.com/Lcharvol/Claude-God/issues/40) stays fixed ([#46](https://github.com/Lcharvol/Claude-God/pull/46))
+- **Fixed**: An expired session was reported as "Rate limited — retrying in 30s", sending users to wait out a limit they never hit. A 429 on a known-expired token now triggers recovery, then says "Session expired" with the Sign In button
+- **Fixed**: Refreshed tokens are written back with `SecItemUpdate` on the exact entry they were read from. The old `security add-generic-password -U -a ""` write could not target Claude Code's account-less item and created a shadow entry beside it
+
+### v2.25.3
+- **Fixed**: Menu bar never turned green — `menuBarIconColor` returned `.primary` under 50% usage, so only orange (≥ 50%) and red (≥ 80%) were ever tinted and the green state the README advertised didn't exist. The menu bar *text* was also never colored in any mode, so even at 85% a red icon sat next to a plain white `85% · 2h31m`. Icon and text now share one tint driven by the worst quota ([#44](https://github.com/Lcharvol/Claude-God/issues/44), thanks @egorovartem-alt)
+- **Added**: "Color by usage level" toggle in Settings → Menu bar (default on) — the removed `.primary` fallback was a deliberate contrast choice for light menu bars, so monochrome stays available
+
+### v2.25.2
+- **Fixed**: Usage tab was blank for enterprise accounts with a dollar budget but no token quotas — the tab gated rendering solely on `!quotas.isEmpty`, so these accounts hit the "Click Refresh" empty state instead of their Extra Usage card. The menu bar, rings and alerts already handled this via `allNotifiableQuotas`; the tab was the last surface still keyed on raw `quotas` ([#42](https://github.com/Lcharvol/Claude-God/pull/42), thanks @ecoffey)
+- **Fixed**: Compact mode never rendered extra usage at all, so the same accounts would have seen an almost-empty panel. It now shows an Extra Usage line — percentage bar when a monthly limit exists, On/Off badge otherwise
+
+### v2.25.1
+- **Fixed**: Daily forced `claude /login` — Claude God's background token-health timer + a `refreshInternal` fallback were consuming Claude Code's single-use OAuth refresh token, invalidating the CLI's in-memory copy every ~24h. Removed both paths and deleted `selfRefreshToken`/`persistRefreshedCredentials` from `AuthManager` so no future path can regress this. Claude God now only reads credentials; when its token expires it reloads from disk/Keychain (picking up any refresh Claude Code did itself) and otherwise surfaces "Session expired — run `claude auth login`" ([#40](https://github.com/Lcharvol/Claude-God/issues/40), thanks @RobinMobers97)
+
+### v2.25.0
+- **Added**: JSON usage export — opt-in toggle writes a full snapshot to `~/.claude-god/usage.json` after every refresh, so tmux/i3blocks/dashboards can read live Claude usage without hitting the OAuth API themselves
+- **Added**: Claude Code statusline integration — one-click install a helper script that prints `session · weekly · today` colored inside every Claude Code prompt via the `statusLine` setting
+- **Added**: Notarized release pipeline — the CI transparently upgrades from ad-hoc to Developer ID signing + Apple notarization + stapling as soon as the six Apple secrets are configured on the repo; users then no longer need to run `xattr -cr` after install ([setup guide](docs/NOTARIZATION.md))
+
+### v2.24.3
+- **Fixed**: Transparent phantom window when changing text size — `WindowTopAnchor` only resized the `NSPanel`'s height, so SwiftUI's content resize on textScale change left an empty backing halo (or overflowed the window). Anchor now resizes width too and keeps the top-right corner fixed so the popover stays anchored under its status item
+
+### v2.24.2
+- **Fixed**: "Sign In" button in Settings appeared to do nothing on a fresh install — clicking it flashed "Signing in..." briefly then silently reverted. The error message ("Claude CLI not found — install with `npm i -g @anthropic-ai/claude-code`") was set correctly but was only rendered in the Usage-tab error banner, which fresh-install users never see (they're routed straight to Settings by the `!isAuthenticated` gate). The Authentication card now displays the error under the Sign In button
+
+### v2.24.1
+- **Fixed**: Intel Mac support restored — the release DMG is now a universal binary (arm64 + x86_64). The GitHub Actions Apple Silicon runner was producing arm64-only builds that Intel users couldn't launch; added `ARCHS="arm64 x86_64"` + `ONLY_ACTIVE_ARCH=NO` to the workflow, no source changes needed ([#34](https://github.com/Lcharvol/Claude-God/issues/34), thanks @kelvincht)
+
+### v2.24.0
+- **Added**: Adjustable popover text size (S / M / L / XL) — new preset picker in Settings resizes every font in the popover via a `textScale` environment value + `.shFont(...)` view modifier (no `.scaleEffect` blur). Popover width scales with the multiplier so bigger type doesn't wrap. Menu bar untouched; default `M` (1.0) leaves existing users unchanged ([#33](https://github.com/Lcharvol/Claude-God/issues/33), [#39](https://github.com/Lcharvol/Claude-God/pull/39), thanks @nairdaleo)
+- **Added**: Model-scoped weekly quotas surfaced in the usage list — `weekly_scoped` entries from the OAuth `limits` array (currently the **Fable** weekly quota on Max+) now render as `"Weekly (<name>)"` alongside the existing "Weekly (all)" row, and downstream code (notifications, alert rules, rings, widget) picks them up generically ([#36](https://github.com/Lcharvol/Claude-God/pull/36), thanks @pieropalevsky)
+- **Fixed**: Permanent "Session expired" that no sign-in could clear — two combined bugs: credential loaders returned `~/.claude/.credentials.json` without checking expiry (pinning the app to a dead token while a valid one sat in the Keychain), and the embedded `claude auth login` PTY had no stdin write path so the "paste your authorization code" prompt was unanswerable. Both entry points now delegate to a single `resolveCredentials` that picks whichever source has the latest `expiresAt`, and `TerminalSession.send(_:)` adds a line-buffered write to the PTY master with a monospaced input row in the sign-in view ([#37](https://github.com/Lcharvol/Claude-God/issues/37), [#38](https://github.com/Lcharvol/Claude-God/pull/38))
 
 ### v2.23.4
 - **Fixed**: Repeated "Claude God wants to use your confidential information stored in `Claude Code-credentials-XXXXXXXX`" prompt — newer Claude Code versions write credentials under suffixed service names, and the per-entry data fetch in `loadBestKeychainEntryWithPrefix` used `SecItemCopyMatching + kSecReturnData`, which prompts on every read. The fetch now reuses the existing `security find-generic-password` helper with the exact service name discovered from the non-prompting list query, so the dialog loop disappears ([#30](https://github.com/Lcharvol/Claude-God/issues/30), [#31](https://github.com/Lcharvol/Claude-God/pull/31), thanks @nairdaleo)

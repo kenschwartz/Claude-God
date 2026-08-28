@@ -30,6 +30,32 @@ enum RefreshInterval: Int, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Popover text size
+
+/// Multiplier applied to every font in the popover. Stored as the raw multiplier
+/// so future presets can be added without migrating persisted values.
+enum TextScale: Double, CaseIterable, Identifiable {
+    case small = 0.9
+    case medium = 1.0
+    case large = 1.2
+    case extraLarge = 1.4
+
+    var id: Double { rawValue }
+
+    var label: String {
+        switch self {
+        case .small: return "S"
+        case .medium: return "M"
+        case .large: return "L"
+        case .extraLarge: return "XL"
+        }
+    }
+
+    static func nearest(to value: Double) -> TextScale {
+        allCases.min(by: { abs($0.rawValue - value) < abs($1.rawValue - value) }) ?? .medium
+    }
+}
+
 // MARK: - Menu bar display mode
 
 enum MenuBarDisplayMode: Int, CaseIterable, Identifiable {
@@ -139,6 +165,7 @@ private struct OAuthUsageResponse: Decodable {
     let iguanaNecktie: QuotaData?
     let omelettPromotional: QuotaData?
     let extraUsage: ExtraUsageData?
+    let limits: [LimitEntry]?
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
@@ -151,6 +178,35 @@ private struct OAuthUsageResponse: Decodable {
         case iguanaNecktie = "iguana_necktie"
         case omelettPromotional = "omelette_promotional"
         case extraUsage = "extra_usage"
+        case limits
+    }
+}
+
+/// Entry in the `limits` array — model-scoped quotas (e.g. the Fable weekly
+/// limit) only appear here, not as top-level buckets.
+private struct LimitEntry: Decodable {
+    let kind: String
+    let percent: Double?
+    let resetsAt: String?
+    let scope: LimitScope?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case percent
+        case resetsAt = "resets_at"
+        case scope
+    }
+}
+
+private struct LimitScope: Decodable {
+    let model: LimitScopeModel?
+}
+
+private struct LimitScopeModel: Decodable {
+    let displayName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
     }
 }
 
@@ -384,6 +440,33 @@ class UsageManager: ObservableObject {
         }
     }
 
+    @Published var textScale: TextScale {
+        didSet {
+            UserDefaults.standard.set(textScale.rawValue, forKey: UDKey.textScale)
+        }
+    }
+
+    /// When on, the current usage snapshot is written to `~/.claude-god/usage.json`
+    /// after every refresh so external tools (statusline, tmux, dashboards) can read it.
+    @Published var exportUsageJSON: Bool {
+        didSet {
+            UserDefaults.standard.set(exportUsageJSON, forKey: UDKey.exportUsageJSON)
+            if exportUsageJSON {
+                exportSnapshotIfEnabled()
+            } else {
+                UsageExporter.removeSnapshot()
+            }
+        }
+    }
+
+    /// True once the user has run the "install statusline helper" flow.
+    /// Owned by Settings UI; drives label state ("Installed" vs "Install").
+    @Published var statuslineInstalled: Bool {
+        didSet {
+            UserDefaults.standard.set(statuslineInstalled, forKey: UDKey.statuslineInstalled)
+        }
+    }
+
     @Published var autoReconnect: Bool {
         didSet {
             UserDefaults.standard.set(autoReconnect, forKey: UDKey.autoReconnect)
@@ -399,6 +482,14 @@ class UsageManager: ObservableObject {
         didSet {
             UserDefaults.standard.set(menuBarDisplayMode.rawValue, forKey: UDKey.menuBarDisplayMode)
             setupCountdownTimer()
+        }
+    }
+
+    /// Tints the menu bar icon *and* text by usage level. Off falls back to the system
+    /// color, for users who prefer a monochrome menu bar.
+    @Published var coloredMenuBar: Bool {
+        didSet {
+            UserDefaults.standard.set(coloredMenuBar, forKey: UDKey.coloredMenuBar)
         }
     }
 
@@ -515,22 +606,19 @@ class UsageManager: ObservableObject {
         }
     }
 
-    /// Secondary color hint for distinguishing warning (half-fill) from critical
+    /// Secondary hint distinguishing warning from critical when the menu bar is monochrome.
+    /// With tinting on, the color already carries that signal, so dimming only costs legibility.
     var menuBarIconOpacity: Double {
-        guard let q = worstQuota else { return 1.0 }
-        switch q.level {
-        case .critical: return 1.0
-        case .warning: return 0.7
-        case .good: return 1.0
-        }
+        guard !coloredMenuBar, let q = worstQuota else { return 1.0 }
+        return q.level == .warning ? 0.7 : 1.0
     }
 
-    var menuBarIconColor: Color {
-        guard let q = worstQuota else { return .primary }
-        switch q.level {
-        case .good: return .primary  // Use system color for contrast on light/dark menu bar
-        case .warning, .critical: return q.level.color
-        }
+    /// Usage-level tint applied to both the menu bar icon and its text, so the whole
+    /// label reads as one status indicator. `.primary` when tinting is off or no quota
+    /// has loaded yet — the system color keeps contrast on light and dark menu bars.
+    var menuBarTint: Color {
+        guard coloredMenuBar, let q = worstQuota else { return .primary }
+        return q.level.color
     }
 
     var nextResetDate: Date? {
@@ -726,6 +814,8 @@ class UsageManager: ObservableObject {
     // MARK: - Constants
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    /// Budget for a session recovery round-trip (Keychain read + possible token refresh).
+    private static let sessionRecoveryTimeout: TimeInterval = 20
     private static let maxRetries = 5
     private static let retryBaseDelay: Double = 5
     private static let rateLimitRetryBaseDelay: Double = 5
@@ -745,11 +835,8 @@ class UsageManager: ObservableObject {
     private var autoRefreshTimer: AnyCancellable?
     private var activeSessionTimer: AnyCancellable?
     private var reconnectPollTimer: AnyCancellable?
-    private var tokenHealthTimer: AnyCancellable?
     private var expiredCredentialTimer: AnyCancellable?
     private var cancellables = Set<AnyCancellable>()
-    private var isRefreshingToken = false
-    private var tokenRefreshQueue: [(Bool) -> Void] = [] // queued callbacks for concurrent refresh requests
     private var statsWorkItem: DispatchWorkItem?
     private var timelineWorkItem: DispatchWorkItem?
     private var roiWorkItem: DispatchWorkItem?
@@ -773,11 +860,16 @@ class UsageManager: ObservableObject {
         self.notificationThreshold = ud.object(forKey: UDKey.notificationThreshold) as? Double ?? 20.0
         self.launchAtLogin = ud.bool(forKey: UDKey.launchAtLogin)
         self.compactMode = ud.bool(forKey: UDKey.compactMode)
+        let savedTextScale = ud.double(forKey: UDKey.textScale)
+        self.textScale = savedTextScale > 0 ? TextScale.nearest(to: savedTextScale) : .medium
+        self.exportUsageJSON = ud.bool(forKey: UDKey.exportUsageJSON)
+        self.statuslineInstalled = ud.bool(forKey: UDKey.statuslineInstalled)
         self.autoReconnect = ud.bool(forKey: UDKey.autoReconnect)
         let savedHeight = ud.double(forKey: UDKey.windowHeight)
         self.windowHeight = savedHeight > 0 ? savedHeight : 650
         let savedDisplayMode = ud.integer(forKey: UDKey.menuBarDisplayMode)
         self.menuBarDisplayMode = MenuBarDisplayMode(rawValue: savedDisplayMode) ?? .percentageAndTimer
+        self.coloredMenuBar = ud.object(forKey: UDKey.coloredMenuBar) as? Bool ?? true
         self.dailyBudget = ud.double(forKey: UDKey.dailyBudget)
 
         // Load ring stat labels for Icon+ mode
@@ -863,7 +955,10 @@ class UsageManager: ObservableObject {
                 guard let self else { return }
                 // tokenExpired guard prevents a flicker loop: fetchUsage -> reloadCredentials -> auth republishes -> sink fires again.
                 if self.auth.tokenExpired {
-                    if self.autoReconnect && !self.isAutoReconnecting && !self.reconnectExhausted {
+                    // Give the silent path first refusal: popping a sign-in terminal
+                    // for a session the poller can restore on its own is pure noise.
+                    if self.autoReconnect && !self.isAutoReconnecting && !self.reconnectExhausted
+                        && !self.auth.canSelfRefresh {
                         self.launchAutoReconnect()
                     }
                     // Poll credentials in the background so a manual `claude auth login`
@@ -883,7 +978,6 @@ class UsageManager: ObservableObject {
         setupAutoRefresh()
         setupActiveSessionDetection()
         setupWakeObserver()
-        setupTokenHealthTimer()
         isGitAvailable = GitAnalyzer.isGitAvailable()
 
         if notificationsEnabled {
@@ -943,6 +1037,7 @@ class UsageManager: ObservableObject {
                 self?.sessionHistory = result.recentSessions
                 self?.isLoadingStats = false
                 self?.lastStatsRefresh = Date()
+                self?.exportSnapshotIfEnabled()
                 Log.info("Stats: today=$\(String(format: "%.2f", today.totalCost)) week=$\(String(format: "%.2f", week.totalCost)) month=$\(String(format: "%.2f", month.totalCost)) projects=\(month.byProject.count) sessions=\(result.recentSessions.count)")
             }
         }
@@ -1252,9 +1347,18 @@ class UsageManager: ObservableObject {
                     self.expiredCredentialTimer = nil
                     return
                 }
-                self.auth.reloadCredentials { [weak self] _ in
-                    guard let self, !self.auth.tokenExpired else { return }
-                    Log.info("Expired credential poller: fresh credentials detected, resuming")
+                self.auth.recoverSession { [weak self] recovered in
+                    guard let self else { return }
+                    guard recovered, !self.auth.tokenExpired else {
+                        // Silent recovery is out of options — fall back to asking
+                        // the user to sign in, if they opted into auto-reconnect.
+                        if self.autoReconnect && !self.isAutoReconnecting
+                            && !self.reconnectExhausted && !self.auth.canSelfRefresh {
+                            self.launchAutoReconnect()
+                        }
+                        return
+                    }
+                    Log.info("Expired credential poller: session recovered, resuming")
                     self.expiredCredentialTimer?.cancel()
                     self.expiredCredentialTimer = nil
                     self.reconnectExhausted = false
@@ -1326,9 +1430,10 @@ class UsageManager: ObservableObject {
     }
 
     private func refreshInternal() {
-        // Safety: if isLoading has been stuck for >20s, cancel in-flight fetch and reset
-        if isLoading, let started = loadingStartedAt, Date().timeIntervalSince(started) > 20 {
-            Log.warn("isLoading stuck for >20s — cancelling fetch and resetting")
+        // Safety: if isLoading has been stuck for >30s, cancel in-flight fetch and reset.
+        // Must stay above sessionRecoveryTimeout so a legitimate recovery isn't killed.
+        if isLoading, let started = loadingStartedAt, Date().timeIntervalSince(started) > 30 {
+            Log.warn("isLoading stuck for >30s — cancelling fetch and resetting")
             currentFetchTask?.cancel()
             finishLoading()
         }
@@ -1338,68 +1443,12 @@ class UsageManager: ObservableObject {
             return
         }
 
-        if auth.tokenNeedsRefresh && auth.refreshToken != nil {
-            isLoading = true
-            loadingStartedAt = Date()
-            errorMessage = nil
-            if isRefreshingToken {
-                // Already refreshing — queue this request to avoid duplicate token refreshes
-                tokenRefreshQueue.append { [weak self] success in
-                    guard let self else { return }
-                    if success { self.fetchUsage() }
-                    else { self.finishLoading(error: "Session expired — run `claude auth login`") }
-                }
-                return
-            }
-            isRefreshingToken = true
-            var didComplete = false
-            let timeout = DispatchWorkItem { [weak self] in
-                guard let self, !didComplete else { return }
-                didComplete = true
-                Log.warn("Token refresh timed out after 10s")
-                self.isRefreshingToken = false
-                let queued = self.tokenRefreshQueue
-                self.tokenRefreshQueue.removeAll()
-                self.finishLoading(error: "Session expired — run `claude auth login`")
-                for callback in queued { callback(false) }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: timeout)
-            auth.reloadCredentials { [weak self] success in
-                guard let self, !didComplete else { return }
-
-                if success && !self.auth.tokenExpired {
-                    // Got a fresh token from file or Keychain (e.g. Claude Code refreshed it)
-                    timeout.cancel()
-                    didComplete = true
-                    self.isRefreshingToken = false
-                    let queued = self.tokenRefreshQueue
-                    self.tokenRefreshQueue.removeAll()
-                    self.fetchUsage()
-                    for callback in queued { callback(true) }
-                } else {
-                    // Token still expired — attempt silent self-refresh via OAuth refresh_token grant
-                    Log.info("Reloaded credentials still expired — attempting silent self-refresh")
-                    self.auth.selfRefreshToken { [weak self] refreshed in
-                        guard let self else { return }
-                        timeout.cancel()
-                        guard !didComplete else { return }
-                        didComplete = true
-                        self.isRefreshingToken = false
-                        let queued = self.tokenRefreshQueue
-                        self.tokenRefreshQueue.removeAll()
-                        if refreshed {
-                            self.fetchUsage()
-                            for callback in queued { callback(true) }
-                        } else {
-                            self.finishLoading(error: "Session expired — run `claude auth login`")
-                            for callback in queued { callback(false) }
-                        }
-                    }
-                }
-            }
-            return
-        }
-
+        // Never *proactively* refresh the OAuth token — it is single-use and shared
+        // with the Claude Code CLI, so consuming it early invalidates the CLI's
+        // in-memory copy and forces the user to /login (see issue #40). Recovery is
+        // reactive only: fetchUsage calls auth.recoverSession, which reloads from
+        // disk/Keychain and refreshes solely when the token has been dead so long
+        // that no CLI can still be holding it.
         isLoading = true
         loadingStartedAt = Date()
         errorMessage = nil
@@ -1415,16 +1464,16 @@ class UsageManager: ObservableObject {
         }
 
         if auth.tokenExpired {
-            Log.warn("Token expired, attempting to reload credentials...")
+            Log.warn("Token expired, attempting to recover the session...")
             var didComplete = false
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, !didComplete else { return }
                 didComplete = true
-                Log.warn("Credential reload timed out after 10s")
+                Log.warn("Session recovery timed out after \(Int(Self.sessionRecoveryTimeout))s")
                 self.finishLoading(error: "Session expired — run `claude auth login`")
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
-            auth.reloadCredentials { [weak self] success in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionRecoveryTimeout, execute: timeout)
+            auth.recoverSession { [weak self] success in
                 timeout.cancel()
                 guard let self, !didComplete else { return }
                 didComplete = true
@@ -1518,9 +1567,9 @@ class UsageManager: ObservableObject {
                     self.updateWidgetData()
 
                 case 401, 403:
-                    if self.auth.refreshToken != nil && retryCount == 0 {
-                        Log.info("Got \(httpResponse.statusCode), attempting token refresh...")
-                        self.auth.reloadCredentials { [weak self] success in
+                    if retryCount == 0 {
+                        Log.info("Got \(httpResponse.statusCode), attempting session recovery...")
+                        self.auth.recoverSession { [weak self] success in
                             guard let self else { return }
                             if success {
                                 self.fetchUsage(retryCount: retryCount + 1)
@@ -1535,41 +1584,52 @@ class UsageManager: ObservableObject {
                 case 429:
                     let retryAfterHeader = httpResponse.value(forHTTPHeaderField: "Retry-After")
                     let retryAfterValue = retryAfterHeader.flatMap(Double.init) ?? -1
-                    self.consecutive429Count += 1
 
-                    // Retry-After:0 likely means stale token — try refreshing once
-                    if retryAfterValue <= 0 && self.auth.refreshToken != nil && retryCount == 0 {
-                        Log.info("429 with Retry-After:\(Int(retryAfterValue)) — likely stale token, refreshing...")
-                        self.auth.reloadCredentials { [weak self] success in
+                    // A 429 on a token we already know is expired — or one answered
+                    // with Retry-After: 0 — is an authentication artifact, not a quota
+                    // limit. Recover the session instead of starting a cooldown and
+                    // telling the user to wait for a limit that was never hit.
+                    let looksLikeStaleToken = self.auth.tokenExpired || retryAfterValue <= 0
+                    if looksLikeStaleToken && retryCount == 0 {
+                        Log.info("429 (Retry-After:\(Int(retryAfterValue)), expired:\(self.auth.tokenExpired)) — recovering session...")
+                        self.auth.recoverSession { [weak self] success in
                             guard let self else { return }
                             if success {
-                                Log.info("Token refreshed, retrying fetch...")
+                                Log.info("Session recovered, retrying fetch...")
                                 self.fetchUsage(retryCount: retryCount + 1)
                             } else {
                                 self.finishLoading(error: "Session expired — run `claude auth login`")
                             }
                         }
+                        return
+                    }
+
+                    // Recovery already ran and the token is still dead: report the real
+                    // problem rather than an imaginary rate limit.
+                    if self.auth.tokenExpired {
+                        self.finishLoading(error: "Session expired — run `claude auth login`")
+                        return
+                    }
+
+                    self.consecutive429Count += 1
+                    // Server provided a real Retry-After: respect it (capped at 2h)
+                    let cooldown: Double
+                    if retryAfterValue > 0 {
+                        cooldown = min(retryAfterValue, 7200)
                     } else {
-                        // Server provided a real Retry-After: respect it (capped at 2h)
-                        // No Retry-After or zero after token refresh failed: short cooldown
-                        let cooldown: Double
-                        if retryAfterValue > 0 {
-                            cooldown = min(retryAfterValue, 7200)
-                        } else {
-                            // No Retry-After header — use moderate backoff
-                            let steps: [Double] = [15, 30, 60, 120, 300, 600]
-                            let index = min(self.consecutive429Count - 1, steps.count - 1)
-                            cooldown = steps[index]
-                        }
-                        self.rateLimitedUntil = Date().addingTimeInterval(cooldown)
-                        if !self.quotas.isEmpty {
-                            self.finishLoading()
-                            Log.info("Rate limited (429), keeping existing data, retry in \(Int(cooldown))s")
-                        } else {
-                            let display = cooldown >= 60 ? "\(Int(cooldown / 60))min" : "\(Int(cooldown))s"
-                            self.finishLoading(error: "Rate limited — retrying in \(display)")
-                            Log.info("Rate limited (429 #\(self.consecutive429Count)), no data yet, will auto-retry in \(Int(cooldown))s")
-                        }
+                        // No Retry-After header — use moderate backoff
+                        let steps: [Double] = [15, 30, 60, 120, 300, 600]
+                        let index = min(self.consecutive429Count - 1, steps.count - 1)
+                        cooldown = steps[index]
+                    }
+                    self.rateLimitedUntil = Date().addingTimeInterval(cooldown)
+                    if !self.quotas.isEmpty {
+                        self.finishLoading()
+                        Log.info("Rate limited (429), keeping existing data, retry in \(Int(cooldown))s")
+                    } else {
+                        let display = cooldown >= 60 ? "\(Int(cooldown / 60))min" : "\(Int(cooldown))s"
+                        self.finishLoading(error: "Rate limited — retrying in \(display)")
+                        Log.info("Rate limited (429 #\(self.consecutive429Count)), no data yet, will auto-retry in \(Int(cooldown))s")
                     }
 
                 default:
@@ -1627,6 +1687,19 @@ class UsageManager: ObservableObject {
             (response.omelettPromotional,"Design Promo (7d)",   "gift.fill"),
         ]
 
+        let scopedWeeklyQuotas = (response.limits ?? [])
+            .filter { $0.kind == "weekly_scoped" }
+            .compactMap { entry -> UsageQuota? in
+                guard let name = entry.scope?.model?.displayName,
+                      let percent = entry.percent else { return nil }
+                return UsageQuota(
+                    label: "Weekly (\(name))",
+                    icon: "book.fill",
+                    utilization: percent,
+                    resetsAt: entry.resetsAt.flatMap(Formatters.parseISO)
+                )
+            }
+
         quotas = quotaDefs.compactMap { def in
             guard let q = def.quota else { return nil }
             return UsageQuota(
@@ -1635,9 +1708,35 @@ class UsageManager: ObservableObject {
                 utilization: q.utilization,
                 resetsAt: q.resetsAt.flatMap(Formatters.parseISO)
             )
-        }
+        } + scopedWeeklyQuotas
         extraUsage = response.extraUsage
         Log.info("Parsed \(quotas.count) quotas, extraUsage=\(response.extraUsage != nil)")
+        exportSnapshotIfEnabled()
+    }
+
+    /// Write the current usage snapshot to `~/.claude-god/usage.json` when the
+    /// user has opted into the export. No-op otherwise. Called after every
+    /// successful OAuth refresh and after JSONL stats reload so external
+    /// consumers (statusline, tmux) see the freshest numbers.
+    func exportSnapshotIfEnabled() {
+        guard exportUsageJSON else { return }
+        guard !quotas.isEmpty else { return }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        guard let data = UsageExporter.makeSnapshot(
+            version: version,
+            quotas: quotas,
+            extraUsage: extraUsage,
+            activeSessionRunning: isSessionActive,
+            activeSessionCost: activeSessionCost,
+            activeSessionMessages: activeSessionMessages,
+            today: todayStats,
+            month: monthStats,
+            monthlyForecast: monthlyForecast,
+            credentialSource: credentialSource.rawValue
+        ) else { return }
+        DispatchQueue.global(qos: .utility).async {
+            UsageExporter.writeSnapshot(data)
+        }
     }
 
     // MARK: - Countdown
@@ -1731,28 +1830,6 @@ class UsageManager: ObservableObject {
         .sink { [weak self] _ in
             self?.autoRefresh()
         }
-    }
-
-    // MARK: - Proactive token health
-
-    /// Fires every 30 minutes. If the access token expires within the next hour,
-    /// silently self-refreshes via the OAuth refresh_token grant so the app
-    /// stays online without user intervention.
-    private func setupTokenHealthTimer() {
-        tokenHealthTimer?.cancel()
-        tokenHealthTimer = Timer.publish(every: 30 * 60, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self, self.isAuthenticated else { return }
-                guard let expiresAt = self.auth.tokenExpiresAt else { return }
-                let expiresDate = Date(timeIntervalSince1970: expiresAt / 1000)
-                let timeUntilExpiry = expiresDate.timeIntervalSinceNow
-                guard timeUntilExpiry < 3600 && !self.auth.tokenExpired else { return }
-                Log.info("Token health: expires in \(Int(timeUntilExpiry / 60))min — proactively refreshing")
-                self.auth.selfRefreshToken { success in
-                    Log.info("Proactive token refresh: \(success ? "succeeded" : "failed")")
-                }
-            }
     }
 
     // MARK: - Wake observer

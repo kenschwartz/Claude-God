@@ -11,6 +11,7 @@ enum UDKey {
     static let notificationThreshold = "notificationThreshold"
     static let launchAtLogin = "launchAtLogin"
     static let compactMode = "compactMode"
+    static let textScale = "textScale"
     static let menuBarDisplayMode = "menuBarDisplayMode"
     static let dailyBudget = "dailyBudget"
     static let dailyRange = "dailyRange"
@@ -27,6 +28,9 @@ enum UDKey {
     static let widgetLastUpdate = "widgetLastUpdate"
     static let windowHeight = "windowHeight"
     static let ringStatLabels = "ringStatLabels"
+    static let exportUsageJSON = "exportUsageJSON"
+    static let statuslineInstalled = "statuslineInstalled"
+    static let coloredMenuBar = "coloredMenuBar"
 }
 
 // MARK: - Logging
