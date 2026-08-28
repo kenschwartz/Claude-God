@@ -114,10 +114,15 @@ Widget/
   ClaudeGodWidget.swift   — WidgetKit desktop widget
 ```
 
-## Build & Run
+## Build & Deploy
+
+`make build` (xcodegen + xcodebuild) puts products in `build/Build/Products/Release/`, NOT DerivedData. The installed app runs from `/Applications/Claude God.app` (the login item points there), so a rebuild is not live until you deploy:
 
 ```bash
-xcodegen generate
-xcodebuild -scheme ClaudeGod -configuration Release build
-cp -R ~/Library/Developer/Xcode/DerivedData/ClaudeGod-*/Build/Products/Release/Claude\ God.app /Applications/
+make build
+ditto "build/Build/Products/Release/Claude God.app" "/Applications/Claude God.app"
+codesign --force --deep -s - "/Applications/Claude God.app"   # linker-signed build fails strict validation; re-sign ad-hoc
+osascript -e 'quit app "Claude God"'; open "/Applications/Claude God.app"
 ```
+
+`make run` builds and opens the build-dir copy directly (fine for testing, not a deploy). Update flow from upstream: `git fetch upstream && git merge upstream/main`, then the deploy block above.
