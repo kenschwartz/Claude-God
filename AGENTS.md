@@ -17,3 +17,12 @@ project, tags, maps). It feeds an Obsidian vault that mirrors these docs.
 Use relative markdown links: [design](./docs/DESIGN.md)
 NEVER use [[wikilinks]] in this repo. These docs render on GitHub, where
 [[foo]] appears as literal text.
+
+## Fork-local code delta
+
+The fork is docs-only EXCEPT one patch (2026-09-01): Sources/UsageManager.swift
+re-registers the login item at the end of init() when launchAtLogin is on and the
+app runs from /Applications. Upstream only registers on a Settings toggle flip,
+so a bundle deploy strands a stale Background Task Management entry and the app
+silently stops starting at login. Expect a merge conflict near init's closing
+lines when upstream touches init; keep our block.

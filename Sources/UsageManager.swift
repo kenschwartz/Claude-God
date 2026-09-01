@@ -999,6 +999,15 @@ class UsageManager: ObservableObject {
 
         refreshStats()
         checkForUpdates()
+
+        // Deployments replace the bundle in /Applications, but the login-item
+        // registration only refreshes when the Settings toggle flips, so a stale
+        // BTM entry (e.g. pointing at a deleted build directory) silently never
+        // starts at login. Re-register on every launch from /Applications; never
+        // from a dev build, which would point the entry back at DerivedData.
+        if launchAtLogin, Bundle.main.bundleURL.path.hasPrefix("/Applications/") {
+            updateLoginItem()
+        }
     }
 
     // MARK: - Session stats (single-pass optimization)
