@@ -1,5 +1,5 @@
 ---
-title: Extensions Tab: Plugin Marketplace Implementation Plan
+title: "Extensions Tab: Plugin Marketplace Implementation Plan"
 status: superseded
 project: infra
 tags: [plan, plugin, extensions]

@@ -1,5 +1,5 @@
 ---
-title: Claude Branch: Conversation Branching for Claude Code
+title: "Claude Branch: Conversation Branching for Claude Code"
 status: unknown
 project: infra
 tags: [spec, plugin, branching]
